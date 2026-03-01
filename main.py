@@ -1,10 +1,13 @@
 import os
 import ast
 from dotenv import load_dotenv
-from quality_check import validate_ai_output
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from groq import Groq
 import uvicorn
+import json
+import time
+from quality_check import validate_ai_output
+from docstring_module import insert_docstrings_into_code
 
 # ==============================
 # Load Environment Variables
@@ -114,8 +117,21 @@ Respond strictly in valid JSON format like:
             temperature=0.2,
             max_tokens=800
         )
+        raw_output = completion.choices[0].message.content.strip()
 
-        return completion.choices[0].message.content
+        # Extract only JSON array from response
+        start = raw_output.find("[")
+        end = raw_output.rfind("]") + 1
+
+        if start == -1 or end == 0:
+            raise HTTPException(
+                status_code=500,
+                detail="AI did not return valid JSON."
+            )
+
+        cleaned_json = raw_output[start:end]
+
+        return cleaned_json
 
     except Exception as e:
         raise HTTPException(
@@ -138,6 +154,8 @@ async def upload_and_process_python_file(file: UploadFile = File(...)):
         )
 
     try:
+        start_time = time.time()
+
         content = await file.read()
         code_text = content.decode("utf-8")
 
@@ -155,13 +173,31 @@ async def upload_and_process_python_file(file: UploadFile = File(...)):
                 detail="No functions or classes found in file."
             )
 
+        # STEP 5–6
         ai_result = analyze_with_ai(parsed_result, code_text)
+
+        # STEP 9 – Validate
+        is_valid, message = validate_ai_output(parsed_result, ai_result)
+
+        if not is_valid:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Validation Failed: {message}"
+            )
+
+        ai_data = json.loads(ai_result)
+
+        # STEP 8 – Insert Docstrings
+        updated_code = insert_docstrings_into_code(code_text, ai_data)
+
+        end_time = time.time()
+        processing_time = round(end_time - start_time, 2)
 
         return {
             "status": "Success",
             "filename": file.filename,
-            "parsed_structure": parsed_result,
-            "ai_analysis": ai_result
+            "processing_time_seconds": processing_time,
+            "documented_code": updated_code
         }
 
     except HTTPException as e:

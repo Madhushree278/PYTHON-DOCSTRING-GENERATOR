@@ -3,15 +3,16 @@ import requests
 
 st.set_page_config(page_title="Docstring Generator", layout="centered")
 
-st.title("Automated Python Docstring Generator")
-st.write("Upload a Python file to analyze its structure using AST and AI.")
+st.title("🤖 Automated Python Docstring Generator")
+st.write("Upload a Python file and generate AI-powered docstrings automatically.")
 
 uploaded_file = st.file_uploader("Upload a .py file", type=["py"])
 
 if uploaded_file is not None:
-    if st.button("Analyze Code"):
 
-        with st.spinner("Analyzing code using AST and AI..."):
+    if st.button("Generate Docstrings"):
+
+        with st.spinner("Processing with AST + AI..."):
 
             files = {
                 "file": (uploaded_file.name, uploaded_file.getvalue())
@@ -24,21 +25,27 @@ if uploaded_file is not None:
                 )
 
                 if response.status_code == 200:
+
                     result = response.json()
 
-                    st.success("Analysis completed successfully!")
+                    st.success("Docstrings generated successfully!")
 
-                    # STEP 4 Output
-                    st.subheader("Parsed Structure (AST)")
-                    st.json(result["parsed_structure"])
+                    st.subheader("📄 Updated Code")
+                    st.code(result["documented_code"], language="python")
 
-                    # STEP 5 & 6 Output
-                    st.subheader("AI Understanding (Step 5 & 6)")
-                    st.write(result["ai_analysis"])
+                    st.download_button(
+                        label="⬇ Download Documented File",
+                        data=result["documented_code"],
+                        file_name="documented_file.py",
+                        mime="text/plain"
+                    )
+
+                    st.info(
+                        f"⏱️ Processing Time: {result['processing_time_seconds']} seconds"
+                    )
 
                 else:
-                    st.error("Backend Error:")
-                    st.json(response.json())
+                    st.error(response.json()["detail"])
 
             except Exception as e:
                 st.error(f"Connection Error: {str(e)}")
