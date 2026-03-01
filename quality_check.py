@@ -1,4 +1,3 @@
-
 import json
 
 def validate_ai_output(parsed_structure, ai_output):
