@@ -1,13 +1,15 @@
 import os
 import ast
+import json
+import time
 from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from groq import Groq
 import uvicorn
-import json
-import time
+
 from quality_check import validate_ai_output
 from docstring_module import insert_docstrings_into_code
+
 
 # ==============================
 # Load Environment Variables
@@ -22,6 +24,7 @@ if not GROQ_API_KEY:
 
 client = Groq(api_key=GROQ_API_KEY)
 
+
 # ==============================
 # FastAPI App
 # ==============================
@@ -35,10 +38,33 @@ def home():
 
 
 # ==============================
+# Extract Imports (Context Feature)
+# ==============================
+
+def extract_imports(code_text):
+
+    tree = ast.parse(code_text)
+    imports = []
+
+    for node in ast.walk(tree):
+
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imports.append(alias.name)
+
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module if node.module else ""
+            for alias in node.names:
+                imports.append(f"{module}.{alias.name}")
+
+    return imports
+
+
+# ==============================
 # STEP 4: AST Parsing
 # ==============================
 
-def parse_code_with_ast(code_text: str):
+def parse_code_with_ast(code_text):
 
     tree = ast.parse(code_text)
     parsed_data = []
@@ -46,19 +72,40 @@ def parse_code_with_ast(code_text: str):
     for node in tree.body:
 
         if isinstance(node, ast.FunctionDef):
+
+            function_code = ast.get_source_segment(code_text, node)
+
+            called_functions = [
+                n.func.id for n in ast.walk(node)
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+            ]
+
             function_info = {
                 "name": node.name,
                 "parameters": [arg.arg for arg in node.args.args],
                 "returns_value": any(
                     isinstance(n, ast.Return) for n in ast.walk(node)
                 ),
+                "called_functions": called_functions,
+                "function_code": function_code,
                 "type": "function"
             }
+
             parsed_data.append(function_info)
 
         elif isinstance(node, ast.ClassDef):
+
             for body_item in node.body:
+
                 if isinstance(body_item, ast.FunctionDef):
+
+                    method_code = ast.get_source_segment(code_text, body_item)
+
+                    called_functions = [
+                        n.func.id for n in ast.walk(body_item)
+                        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                    ]
+
                     method_info = {
                         "class_name": node.name,
                         "name": body_item.name,
@@ -66,8 +113,11 @@ def parse_code_with_ast(code_text: str):
                         "returns_value": any(
                             isinstance(n, ast.Return) for n in ast.walk(body_item)
                         ),
+                        "called_functions": called_functions,
+                        "function_code": method_code,
                         "type": "class_method"
                     }
+
                     parsed_data.append(method_info)
 
     return parsed_data
@@ -77,37 +127,78 @@ def parse_code_with_ast(code_text: str):
 # STEP 5 & 6: AI Semantic Analysis
 # ==============================
 
-def analyze_with_ai(parsed_structure, code_text):
+def analyze_with_ai(parsed_structure, code_text, imports):
 
     prompt = f"""
-You are a Python code analysis expert.
+You are a senior Python developer and static code analysis expert.
 
-Parsed structure:
+Your task is to analyze Python code and generate accurate docstring information.
+
+Use ALL available context to understand each function or method:
+
+- Function name
+- Parameters
+- Function implementation
+- Class relationships
+- Called functions
+- Full file context
+- Imported libraries
+
+Parsed structure extracted using AST:
 {parsed_structure}
 
-Full source code:
+Imports used in this file:
+{imports}
+
+Full source code of the file:
 {code_text}
 
-For each function or method:
-1. Explain clearly what the function does.
-2. Describe each parameter and its likely type.
-3. Describe what the function returns.
+IMPORTANT RULES:
 
-Respond strictly in valid JSON format like:
+1. You MUST generate documentation for EVERY item in parsed_structure.
+2. Each item may be:
+   - a standalone function
+   - a class method
+3. DO NOT skip any function or method.
+4. Ignore the parameter "self" when documenting parameters.
+5. Infer parameter types based on usage when possible.
+6. If a function does not return anything, set return description to "None".
+7. If return type is obvious (int, str, bool, list, dict), include it.
+8. The number of objects in your JSON output MUST match the number of items in parsed_structure.
+
+Total functions/methods to document: {len(parsed_structure)}
+
+For each function or class method return:
+
+- name
+- purpose (1–2 clear sentences explaining the function behavior)
+- parameters (dictionary of parameter name → description)
+- returns (description of returned value)
+
+Respond ONLY with valid JSON.
+
+Do NOT include:
+- explanations
+- markdown
+- comments
+- text outside JSON
+
+Required JSON format:
 
 [
   {{
-    "name": "",
-    "purpose": "",
+    "name": "function_name",
+    "purpose": "Clear explanation of what the function does.",
     "parameters": {{
-        "param1": "type and meaning"
+      "param1": "type and meaning"
     }},
-    "returns": ""
+    "returns": "description of returned value"
   }}
 ]
 """
 
     try:
+
         completion = client.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=[
@@ -115,11 +206,12 @@ Respond strictly in valid JSON format like:
                 {"role": "user", "content": prompt}
             ],
             temperature=0.2,
-            max_tokens=800
+            max_tokens=900
         )
+
         raw_output = completion.choices[0].message.content.strip()
 
-        # Extract only JSON array from response
+        # Extract JSON safely
         start = raw_output.find("[")
         end = raw_output.rfind("]") + 1
 
@@ -154,6 +246,7 @@ async def upload_and_process_python_file(file: UploadFile = File(...)):
         )
 
     try:
+
         start_time = time.time()
 
         content = await file.read()
@@ -165,6 +258,10 @@ async def upload_and_process_python_file(file: UploadFile = File(...)):
                 detail="File is empty."
             )
 
+        # Extract imports for context
+        imports = extract_imports(code_text)
+
+        # AST Parsing
         parsed_result = parse_code_with_ast(code_text)
 
         if not parsed_result:
@@ -173,10 +270,10 @@ async def upload_and_process_python_file(file: UploadFile = File(...)):
                 detail="No functions or classes found in file."
             )
 
-        # STEP 5–6
-        ai_result = analyze_with_ai(parsed_result, code_text)
+        # AI Analysis
+        ai_result = analyze_with_ai(parsed_result, code_text, imports)
 
-        # STEP 9 – Validate
+        # Validate AI output
         is_valid, message = validate_ai_output(parsed_result, ai_result)
 
         if not is_valid:
@@ -187,16 +284,15 @@ async def upload_and_process_python_file(file: UploadFile = File(...)):
 
         ai_data = json.loads(ai_result)
 
-        # STEP 8 – Insert Docstrings
+        # Insert docstrings
         updated_code = insert_docstrings_into_code(code_text, ai_data)
 
         end_time = time.time()
-        processing_time = round(end_time - start_time, 2)
 
         return {
             "status": "Success",
             "filename": file.filename,
-            "processing_time_seconds": processing_time,
+            "processing_time_seconds": round(end_time - start_time, 2),
             "documented_code": updated_code
         }
 
