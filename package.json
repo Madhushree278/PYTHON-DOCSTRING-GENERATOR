@@ -1,0 +1,40 @@
+{
+  "name": "python-docstring-generator",
+  "displayName": "Python Docstring Generator",
+  "description": "Automatically generate Python docstrings",
+  "version": "0.0.1",
+
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+
+  "categories": [
+    "Other"
+  ],
+
+
+
+  "main": "./out/extension.js",
+
+
+
+  "contributes": {
+    "commands": [
+      {
+        "command": "docstring.generate",
+        "title": "Generate Python Docstring"
+      }
+    ]
+  },
+
+  "scripts": {
+    "compile": "tsc -p ./"
+  },
+
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^25.5.0",
+    "@types/vscode": "^1.80.0",
+    "typescript": "^5.0.0"
+  }
+}
