@@ -36,6 +36,19 @@ app = FastAPI(title="Automated Python Docstring Generator")
 def home():
     return {"message": "API is running successfully 🚀"}
 
+# ==============================
+# NORMALIZE FUNCTION NAMES FOR BETTER AI UNDERSTANDING
+# ==============================
+
+def normalize_name(name):
+    # remove class prefix if present
+    name = name.split(".")[-1]
+
+    # handle __init__ vs init
+    name = name.replace("__", "")
+
+    return name.lower()
+
 
 # ==============================
 # Extract Imports (Context Feature)
@@ -237,7 +250,10 @@ Required JSON format:
 # ==============================
 
 @app.post("/process-code/")
-async def upload_and_process_python_file(file: UploadFile = File(...)):
+async def upload_and_process_python_file(
+    file: UploadFile = File(...),
+    style: str = "google"
+):
 
     if not file.filename.endswith(".py"):
         raise HTTPException(
@@ -270,11 +286,27 @@ async def upload_and_process_python_file(file: UploadFile = File(...)):
                 detail="No functions or classes found in file."
             )
 
-        # AI Analysis
+                # AI Analysis
         ai_result = analyze_with_ai(parsed_result, code_text, imports)
 
+        # Parse AI JSON safely
+        try:
+            ai_data = json.loads(ai_result)
+        except json.JSONDecodeError:
+            raise HTTPException(
+                status_code=500,
+                detail="AI returned invalid JSON."
+            )
+
+        # Normalize function names (fix validation mismatch)
+        for item in parsed_result:
+            item["name"] = normalize_name(item["name"])
+
+        for item in ai_data:
+            item["name"] = normalize_name(item["name"])
+
         # Validate AI output
-        is_valid, message = validate_ai_output(parsed_result, ai_result)
+        is_valid, message = validate_ai_output(parsed_result, json.dumps(ai_data))
 
         if not is_valid:
             raise HTTPException(
@@ -282,10 +314,8 @@ async def upload_and_process_python_file(file: UploadFile = File(...)):
                 detail=f"Validation Failed: {message}"
             )
 
-        ai_data = json.loads(ai_result)
-
         # Insert docstrings
-        updated_code = insert_docstrings_into_code(code_text, ai_data)
+        updated_code = insert_docstrings_into_code(code_text, ai_data, style)
 
         end_time = time.time()
 
