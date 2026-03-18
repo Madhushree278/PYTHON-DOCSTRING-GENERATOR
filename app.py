@@ -124,3 +124,50 @@ if uploaded_file is not None:
 
             except Exception as e:
                 st.error(f"Connection Error: {str(e)}")
+    #explain code section
+    if st.button("🧠 Explain Code"):
+
+        with st.spinner("Analyzing code with AI..."):
+
+            files = {
+                "file": (uploaded_file.name, uploaded_file.getvalue())
+            }
+
+            try:
+                response = requests.post(
+                    "http://127.0.0.1:8000/explain-code/",
+                    files=files
+                )
+
+                if response.status_code == 200:
+
+                    result = response.json()
+
+                    st.success("Code explained successfully!")
+
+                    st.subheader("🧠 AI Explanation Mode")
+
+                    for item in result["explanations"]:
+
+                        with st.expander(f"📌 {item['name']}"):
+
+                            st.write("### 📖 What it does")
+                            st.write(item["simple_explanation"])
+
+                            st.write("### 🔍 Step-by-step")
+                            for step in item["step_by_step"]:
+                                st.write(f"- {step}")
+
+                            st.write("### 🧪 Example")
+                            st.code(item["example"])
+
+                            st.write("### ⚠️ Edge Cases")
+                            for issue in item["edge_cases"]:
+                                if issue and issue.strip():
+                                    st.warning(f"⚠️ {issue.strip()}")
+
+                else:
+                    st.error(response.json()["detail"])
+
+            except Exception as e:
+                st.error(f"Connection Error: {str(e)}")

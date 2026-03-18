@@ -6,11 +6,47 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from groq import Groq
 import uvicorn
+import re
+
 
 from quality_check import validate_ai_output
 from docstring_module import insert_docstrings_into_code
 
+def extract_valid_json(raw_output: str):
+    try:
+        # STEP 1: Extract JSON array
+        start = raw_output.find('[')
+        end = raw_output.rfind(']') + 1
 
+        if start == -1 or end == 0:
+            raise ValueError("No JSON array found")
+
+        json_str = raw_output[start:end]
+
+        # STEP 2: Fix common AI JSON issues safely
+
+        # remove trailing commas
+        json_str = re.sub(r",\s*}", "}", json_str)
+        json_str = re.sub(r",\s*]", "]", json_str)
+
+        # fix smart quotes (very important 🔥)
+        json_str = json_str.replace("“", '"').replace("”", '"')
+
+        # remove invisible control characters
+        json_str = re.sub(r"[\x00-\x1F]+", " ", json_str)
+
+        # STEP 3: Try parsing
+        return json.loads(json_str)
+
+    except Exception:
+        print("\n❌ JSON ERROR DEBUG ----------------")
+        print(raw_output)
+        print("-----------------------------------\n")
+
+        raise HTTPException(
+            status_code=500,
+            detail="AI returned invalid JSON"
+        )
 # ==============================
 # Load Environment Variables
 # ==============================
@@ -41,11 +77,12 @@ def home():
 # ==============================
 
 def normalize_name(name):
-    # remove class prefix if present
     name = name.split(".")[-1]
+    name = name.strip()
 
-    # handle __init__ vs init
-    name = name.replace("__", "")
+    # ✅ Preserve special method names
+    if name.startswith("__") and name.endswith("__"):
+        return name.lower()
 
     return name.lower()
 
@@ -243,8 +280,192 @@ Required JSON format:
             status_code=500,
             detail=f"Groq API Error: {str(e)}"
         )
+def smart_clean_explanations(explanations, parsed_result):
+
+    code_map = {
+        item["name"]: item.get("function_code", "")
+        for item in parsed_result
+    }
+
+    for item in explanations:
+
+        name = item.get("name", "")
+        code = code_map.get(name, "")
+
+        steps = item.get("step_by_step", [])
+        edge_cases = item.get("edge_cases", [])
+
+        code_lower = code.lower()
+
+        # =========================
+        # 🔥 CLEAN STEP-BY-STEP
+        # =========================
+        cleaned_steps = []
+
+        for step in steps:
+            step_lower = step.lower().strip()
+
+            # ❌ remove fake validations
+            if ("check if" in step_lower or "validate" in step_lower) and "if" not in code_lower:
+                continue
+
+            # ❌ remove incomplete steps
+            if step_lower in ["if", "if not", "else"]:
+                continue
+
+            # ❌ remove hallucinated condition
+            if step_lower.startswith("if") and "if" not in code_lower:
+                continue
+
+            cleaned_steps.append(step)
+
+        item["step_by_step"] = cleaned_steps
+
+        # =========================
+        # 🔥 CLEAN EDGE CASES
+        # =========================
+        cleaned_edges = []
+        seen = set()
+
+        for edge in edge_cases:
+            edge_lower = edge.lower().strip()
+
+            # ❌ remove wrong logic (like "return first element if empty")
+            if "return the first" in edge_lower and "empty" in edge_lower:
+                continue
+
+            # ✅ detect ZeroDivisionError
+            if "/" in code_lower and "len(" in code_lower:
+                if "zero" not in edge_lower:
+                    edge = "May raise ZeroDivisionError if divisor is zero"
+                    edge_lower = edge.lower()
+
+            # ❌ remove duplicate ZeroDivisionError
+            if "zerodivisionerror" in edge_lower:
+                if any("zerodivisionerror" in e.lower() for e in cleaned_edges):
+                    continue
+
+            # ✅ detect IndexError
+            if "[0]" in code_lower:
+                if "empty" not in edge_lower:
+                    edge = "May raise IndexError if input list is empty"
+                    edge_lower = edge.lower()
+
+            # ❌ remove fake type errors
+            if ("type" in edge_lower or "string" in edge_lower or "invalid" in edge_lower):
+                if "isinstance" not in code_lower and "type(" not in code_lower:
+                    continue
+
+            # ❌ remove fake empty string returns
+            if "empty string" in edge_lower or "return empty" in edge_lower:
+                if '""' not in code and "return ''" not in code:
+                    continue
+
+            # ❌ remove vague AI statements
+            if ("incorrectly" in edge_lower or "may cause" in edge_lower):
+                if "raise" not in edge_lower:
+                    continue
+
+            # ❌ remove fake padding logic
+            if "pad" in edge_lower:
+                if "len(" not in code_lower:
+                    continue
+
+            # ❌ remove duplicates
+            if edge_lower in seen:
+                continue
+
+            seen.add(edge_lower)
+            cleaned_edges.append(edge)
+
+        item["edge_cases"] = cleaned_edges
+
+    return explanations
+
+#ai explanation
+def explain_code_with_ai(parsed_structure, code_text, imports):
+
+    prompt = f"""
+You are a senior Python developer and an expert teacher.
+
+Your task is to explain Python code in a very clear, beginner-friendly way.
+
+Use the following data:
+
+Parsed Structure:
+{parsed_structure}
+
+Imports:
+{imports}
 
 
+INSTRUCTIONS:
+
+1. Explain EVERY function or method.
+2. Keep explanations SIMPLE and STEP-BY-STEP.
+3. Avoid technical jargon unless necessary.
+4. Ignore "self" parameter.
+
+For each function return:
+
+- name
+- simple_explanation (1–2 lines)
+- step_by_step (list of steps)
+- example (input → output)
+- edge_cases (possible issues)
+
+Edge cases must be logically correct and reflect actual behavior of the code.
+Edge cases must be clearly explained.
+Ensure all examples and edge cases are logically correct and mathematically accurate.
+- Only describe behavior that is explicitly present in the code
+- Do NOT assume validations or checks unless clearly implemented
+- Do NOT invent edge cases
+
+IMPORTANT:
+- Ensure all examples are logically correct
+- Ensure edge cases are accurate
+- Do NOT give incorrect statements
+
+STRICT RULES:
+
+- Return ONLY valid JSON
+- Your response MUST start with [
+- Your response MUST end with ]
+- Do NOT include any explanation outside JSON
+- Do NOT include comments
+- Do NOT include trailing commas
+- Use double quotes for all keys and strings
+- Ensure JSON is perfectly valid and parseable
+
+FORMAT:
+
+[
+  {{
+    "name": "function_name",
+    "simple_explanation": "What this function does",
+    "step_by_step": ["step1", "step2"],
+    "example": "func(1,2) → 3",
+    "edge_cases": ["possible issue"]
+  }}
+]
+"""
+
+    try:
+        completion = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {"role": "system", "content": "You are a helpful coding tutor."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.3,
+            max_tokens=500
+        )
+
+        # ✅ Just return raw output (DO NOT process here)
+        return completion.choices[0].message.content.strip()
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 # ==============================
 # Upload Endpoint
 # ==============================
@@ -334,8 +555,109 @@ async def upload_and_process_python_file(
             status_code=500,
             detail=f"Error processing file: {str(e)}"
         )
+def chunk_list(data, size=3):
+    for i in range(0, len(data), size):
+        yield data[i:i + size]
 
 
+# ===============================explain code section
+@app.post("/explain-code/")
+async def explain_code(file: UploadFile = File(...)):
+
+    if not file.filename.endswith(".py"):
+        raise HTTPException(status_code=400, detail="Only .py files allowed")
+
+    try:
+        content = await file.read()
+        code_text = content.decode("utf-8")
+
+        imports = extract_imports(code_text)
+        parsed_result = parse_code_with_ast(code_text)
+
+        if not parsed_result:
+            raise HTTPException(status_code=400, detail="No functions found")
+
+        # 🔥 CHUNK PROCESSING
+        all_explanations = []
+
+        for chunk in chunk_list(parsed_result, 3):
+            ai_result = explain_code_with_ai(chunk, code_text, imports)
+
+            try:
+                chunk_explanations = extract_valid_json(ai_result)
+
+                if isinstance(chunk_explanations, list):
+                    all_explanations.extend(chunk_explanations)
+
+            except:
+                continue  # skip broken chunk safely
+
+        # ✅ FALLBACK
+        if not all_explanations:
+            explanations = [
+                {
+                    "name": "Error",
+                    "simple_explanation": "AI response formatting failed.",
+                    "step_by_step": ["Please try again"],
+                    "example": "",
+                    "edge_cases": ["Invalid JSON returned by AI"]
+                }
+            ]
+
+        else:
+            explanations = all_explanations
+
+            # 🔥 NAME FIX + SAFE DEFAULTS
+            for item in explanations:
+
+                if not isinstance(item, dict):
+                    continue
+
+                ai_name = item.get("name", "")
+                normalized_ai = ai_name.lower().replace("_", "").strip()
+
+                # ✅ HANDLE __init__
+                if normalized_ai == "init":
+                    item["name"] = "__init__"
+
+                else:
+                    matched_name = None
+
+                    for parsed in parsed_result:
+                        original_name = parsed.get("name", "")
+                        normalized_parsed = original_name.lower().replace("__", "")
+
+                        if (
+                            normalized_ai == normalized_parsed
+                            or normalized_ai == original_name.lower()
+                        ):
+                            matched_name = original_name
+                            break
+
+                    if matched_name:
+                        item["name"] = matched_name
+                    else:
+                        item["name"] = ai_name if ai_name else "unknown"
+
+                # ✅ SAFE DEFAULTS
+                item.setdefault("simple_explanation", "No explanation provided")
+                item.setdefault("step_by_step", [])
+                item.setdefault("example", "")
+                item.setdefault("edge_cases", [])
+
+            # ✅ CLEAN ONLY VALID AI OUTPUT
+            explanations = smart_clean_explanations(explanations, parsed_result)
+
+        return {
+            "status": "success",
+            "explanations": explanations
+        }
+
+    except HTTPException as e:
+        raise e
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 # ==============================
 # Run Server
 # ==============================
