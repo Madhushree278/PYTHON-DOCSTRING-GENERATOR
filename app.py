@@ -171,3 +171,61 @@ if uploaded_file is not None:
 
             except Exception as e:
                 st.error(f"Connection Error: {str(e)}")
+
+
+    if st.button("⚡ Optimize Code"):
+
+        with st.spinner("Optimizing code with AI..."):
+
+            files = {
+                "file": (uploaded_file.name, uploaded_file.getvalue())
+            }
+
+            try:
+                response = requests.post(
+                    "http://127.0.0.1:8000/optimize-code/",
+                    files=files
+                )
+
+                if response.status_code == 200:
+
+                    result = response.json()
+
+                    st.success("Code optimized successfully!")
+
+                    # 🔥 SIDE-BY-SIDE VIEW
+                    st.subheader("⚡ Code Comparison")
+
+                    col1, col2 = st.columns(2)
+
+                    with col1:
+                        st.markdown("### 📄 Original Code")
+                        st.code(code, language="python")
+
+                    with col2:
+                        st.markdown("### 🚀 Optimized Code")
+                        st.code(result["optimized_code"], language="python")
+
+                    # 📊 Improvements
+                    st.subheader("📊 Improvements")
+                    for imp in result["improvements"]:
+                        st.write(f"✅ {imp}")
+
+                    # 🧠 Explanation
+                    st.subheader("🧠 Explanation")
+                    for exp in result["explanations"]:
+                        st.info(exp)
+
+                    # 🔽 Download button (BONUS)
+                    st.download_button(
+                        label="⬇ Download Optimized Code",
+                        data=result["optimized_code"],
+                        file_name="optimized.py",
+                        mime="text/plain"
+                    )
+
+                else:
+                    st.error(response.json()["detail"])
+
+            except Exception as e:
+                st.error(f"Connection Error: {str(e)}")
