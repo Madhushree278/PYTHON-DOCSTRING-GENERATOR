@@ -11,6 +11,7 @@ import re
 
 from quality_check import validate_ai_output
 from docstring_module import insert_docstrings_into_code
+from optimizer_module import run_code_optimization
 
 def extract_valid_json(raw_output: str):
     try:
@@ -655,6 +656,50 @@ async def explain_code(file: UploadFile = File(...)):
 
     except HTTPException as e:
         raise e
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+
+
+@app.post("/optimize-code/")
+async def optimize_code(file: UploadFile = File(...)):
+
+    if not file.filename.endswith(".py"):
+        raise HTTPException(status_code=400, detail="Only .py files allowed")
+
+    try:
+        content = await file.read()
+        code_text = content.decode("utf-8")
+
+        if not code_text.strip():
+            raise HTTPException(status_code=400, detail="File is empty")
+
+        imports = extract_imports(code_text)
+        parsed_result = parse_code_with_ast(code_text)
+
+        if not parsed_result:
+            raise HTTPException(status_code=400, detail="No functions found")
+
+        result = run_code_optimization(
+            client,
+            parsed_result,
+            code_text,
+            imports
+        )
+
+        # ✅ 🔥 STEP 4 FIX (VERY IMPORTANT)
+        optimized_code = result["optimized_code"].replace("\\n", "\n")
+
+        return {
+            "status": "success",
+            "optimized_code": optimized_code,   # 👈 FIXED
+            "improvements": result["improvements"],
+            "explanations": result["explanations"]
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
