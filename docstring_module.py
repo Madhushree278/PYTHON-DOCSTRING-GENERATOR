@@ -1,4 +1,4 @@
-import ast
+from language_handler import get_comment_style
 
 # ===============================
 # Helper: split type + description
@@ -28,67 +28,96 @@ def split_type_desc(text):
 # ===============================
 # STEP 7 – Generate Docstring
 # ===============================
-def create_docstring_from_ai(ai_data, indent, style):
+def create_docstring_from_ai(ai_data, indent, style, original_params=None, lang="python"):
 
     purpose = ai_data["purpose"]
-    parameters = ai_data["parameters"]
-    returns = ai_data["returns"]
+    parameters = ai_data.get("parameters", {})
+    returns = ai_data.get("returns", "None")
 
-    parameters = {k: v for k, v in parameters.items() if k != "self"}
+    # Ensure parameters is a dictionary
+    if isinstance(parameters, list):
+        # Convert list to dictionary if AI returns a list
+        new_params = {}
+        for p in parameters:
+            if isinstance(p, dict) and "name" in p:
+                new_params[p["name"]] = p.get("description", "Any")
+            else:
+                new_params[str(p)] = "Any"
+        parameters = new_params
+    elif not isinstance(parameters, dict):
+        parameters = {}
+
+    # 🔥 HALLUCINATION FILTER: Only keep params that are in the actual source code signature
+    if original_params is not None:
+        valid_params = set(original_params)
+        parameters = {k: v for k, v in parameters.items() if k in valid_params and k != "self"}
+    else:
+        parameters = {k: v for k, v in parameters.items() if k != "self"}
+
+    # 🐍 PYTHON FIX: Normalize "void" to "None" for Python docstrings
+    if lang == "python" and isinstance(returns, str):
+        returns_lower = returns.lower().strip()
+        if returns_lower.startswith("void"):
+            returns = returns.replace("void", "None", 1).replace("VOID", "None", 1).replace("Void", "None", 1)
+
+    comment_style = get_comment_style(lang)
+    start_delim = comment_style["start"]
+    end_delim = comment_style["end"]
+    line_prefix = comment_style["line_prefix"]
 
     doc_lines = [
-        indent + '"""',
-        indent + purpose,
-        indent + ""
+        indent + start_delim,
+        indent + line_prefix + purpose,
+        indent + line_prefix
     ]
 
     # ================= GOOGLE =================
     if style == "google":
 
-        doc_lines.append(indent + "Parameters:")
+        doc_lines.append(indent + line_prefix + "Parameters:")
 
         if parameters:
             for param, desc in parameters.items():
-                doc_lines.append(indent + f"    {param}: {desc}")
+                doc_lines.append(indent + line_prefix + f"    {param}: {desc}")
         else:
-            doc_lines.append(indent + "    None")
+            doc_lines.append(indent + line_prefix + "    None")
 
         doc_lines += [
-            indent + "",
-            indent + "Returns:",
-            indent + f"    {returns}"
+            indent + line_prefix,
+            indent + line_prefix + "Returns:",
+            indent + line_prefix + f"    {returns}"
         ]
 
     # ================= NUMPY =================
     elif style == "numpy":
 
-        doc_lines.append(indent + "Parameters")
-        doc_lines.append(indent + "----------")
+        doc_lines.append(indent + line_prefix + "Parameters")
+        doc_lines.append(indent + line_prefix + "----------")
 
         if parameters:
             for param, desc in parameters.items():
 
                 ptype, pdesc = split_type_desc(desc)
 
-                doc_lines.append(indent + f"{param} : {ptype}")
+                doc_lines.append(indent + line_prefix + f"{param} : {ptype}")
 
                 if pdesc:
-                    doc_lines.append(indent + f"    {pdesc}")
+                    doc_lines.append(indent + line_prefix + f"    {pdesc}")
         else:
-            doc_lines.append(indent + "None")
+            doc_lines.append(indent + line_prefix + "None")
 
         doc_lines += [
-            indent + "",
-            indent + "Returns",
-            indent + "-------"
+            indent + line_prefix,
+            indent + line_prefix + "Returns",
+            indent + line_prefix + "-------"
         ]
 
         rtype, rdesc = split_type_desc(returns)
 
-        doc_lines.append(indent + rtype)
+        doc_lines.append(indent + line_prefix + rtype)
 
         if rdesc and rtype != "None":
-            doc_lines.append(indent + f"    {rdesc}")
+            doc_lines.append(indent + line_prefix + f"    {rdesc}")
 
     # ================= SPHINX =================
     elif style == "sphinx":
@@ -98,20 +127,20 @@ def create_docstring_from_ai(ai_data, indent, style):
 
                 ptype, pdesc = split_type_desc(desc)
 
-                doc_lines.append(indent + f":param {param}: {pdesc}")
-                doc_lines.append(indent + f":type {param}: {ptype}")
+                doc_lines.append(indent + line_prefix + f":param {param}: {pdesc}")
+                doc_lines.append(indent + line_prefix + f":type {param}: {ptype}")
 
         rtype, rdesc = split_type_desc(returns)
 
         if rdesc:
-            doc_lines.append(indent + f":return: {rdesc}")
+            doc_lines.append(indent + line_prefix + f":return: {rdesc}")
         else:
-            doc_lines.append(indent + f":return: None")
+            doc_lines.append(indent + line_prefix + f":return: None")
 
-        doc_lines.append(indent + f":rtype: {rtype}")
+        doc_lines.append(indent + line_prefix + f":rtype: {rtype}")
 
-    # ✅ CRITICAL FIX — close docstring
-    doc_lines.append(indent + '"""')
+    # ✅ Close docstring
+    doc_lines.append(indent + end_delim)
 
     return doc_lines
 
@@ -119,43 +148,83 @@ def create_docstring_from_ai(ai_data, indent, style):
 # ===============================
 # STEP 8 – Insert Docstrings
 # ===============================
-def insert_docstrings_into_code(code, ai_understanding, style="google"):
+def insert_docstrings_into_code(code, ai_understanding, parsed_result, lang="python", style="google"):
 
-    tree = ast.parse(code)
     lines = code.split("\n")
-
     ai_map = {item["name"]: item for item in ai_understanding}
+    
+    # Sort by line number descending to avoid offset issues when removing/inserting
+    sorted_functions = sorted(parsed_result, key=lambda x: x["line"], reverse=True)
 
-    functions = sorted(
-        [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)],
-        key=lambda x: x.lineno
-    )
+    for func in sorted_functions:
+        function_name = func["name"]
+        line_no = func["line"]
+        idx = line_no - 1  # 0-indexed line number
 
-    offset = 0
-
-    for node in functions:
-
-        if ast.get_docstring(node):
+        if function_name not in ai_map or idx >= len(lines):
             continue
 
-        function_name = node.name
+        # ===============================
+        # 1. REMOVE EXISTING DOCSTRING
+        # ===============================
+        
+        if lang == "python":
+            # For Python, docstring is AFTER 'def'
+            check_idx = idx + 1
+            if check_idx < len(lines) and '"""' in lines[check_idx]:
+                start_rm = check_idx
+                end_rm = check_idx
+                # Find end of docstring
+                if lines[check_idx].strip() == '"""':
+                    for i in range(check_idx + 1, len(lines)):
+                        if '"""' in lines[i]:
+                            end_rm = i
+                            break
+                elif lines[check_idx].count('"""') == 1:
+                    for i in range(check_idx + 1, len(lines)):
+                        if '"""' in lines[i]:
+                            end_rm = i
+                            break
+                # Remove lines
+                del lines[start_rm:end_rm + 1]
+        else:
+            # For C, Java, JS, docstring is BEFORE the signature
+            check_idx = idx - 1
+            if check_idx >= 0 and "*/" in lines[check_idx]:
+                end_rm = check_idx
+                start_rm = check_idx
+                # Find start of docstring
+                for i in range(check_idx, -1, -1):
+                    if "/**" in lines[i] or "/*" in lines[i]:
+                        start_rm = i
+                        break
+                # Remove lines
+                del lines[start_rm:end_rm + 1]
+                # Adjust idx for insertion after deletion
+                idx = start_rm
 
-        if function_name not in ai_map:
-            continue
-
-        def_line = lines[node.lineno - 1 + offset]
+        # ===============================
+        # 2. INSERT NEW DOCSTRING
+        # ===============================
+        
+        def_line = lines[idx] if idx < len(lines) else ""
         base_indent = len(def_line) - len(def_line.lstrip())
-        indent = " " * (base_indent + 4)
+        
+        if lang == "python":
+            indent = " " * (base_indent + 4)
+            insert_position = idx + 1
+        else:
+            indent = " " * base_indent
+            insert_position = idx
 
         doc_lines = create_docstring_from_ai(
-            ai_map[function_name],
-            indent,
-            style
+            ai_data=ai_map[function_name],
+            indent=indent,
+            style=style,
+            original_params=func.get("parameters", []),
+            lang=lang
         )
 
-        insert_position = node.lineno + offset
         lines[insert_position:insert_position] = doc_lines
-
-        offset += len(doc_lines)
 
     return "\n".join(lines)

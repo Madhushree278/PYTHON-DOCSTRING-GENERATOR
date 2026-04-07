@@ -6,8 +6,9 @@ def validate_ai_output(parsed_structure, ai_output):
     except json.JSONDecodeError:
         return False, "Invalid JSON returned by AI."
 
-    parsed_names = {item["name"] for item in parsed_structure}
-    ai_names = {item["name"] for item in ai_data}
+    # Normalize names for robust comparison (case-insensitive)
+    parsed_names = {item["name"].strip().lower() for item in parsed_structure}
+    ai_names = {item["name"].strip().lower() for item in ai_data}
 
     missing = parsed_names - ai_names
 
